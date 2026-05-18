@@ -78,6 +78,15 @@ TEX_STYLES_BY_Y_INDEX: dict[int, str] = {
     6: r"dashed, mark=x, mark size=1.5pt, mark repeat=20, color=black",
 }
 
+PROFILE_PDF_STEMS = [
+    "dp_1e-1",
+    "dp_1e-3",
+    "dp_1e-5",
+    "pp_1e-1",
+    "pp_1e-3",
+    "pp_1e-5",
+]
+
 
 @dataclasses.dataclass(frozen=True)
 class StatsPoint:
@@ -338,6 +347,7 @@ def style_tex_files(directory: Path, remove_legends: bool) -> int:
         text = tex_file.read_text(encoding="utf-8")
         original = text
         text = text.replace("\u00a0", " ")
+        text = make_profile_tex_portable(text)
 
         def replace_addplot(match: re.Match[str]) -> str:
             y_index = int(match.group(1))
@@ -357,6 +367,52 @@ def style_tex_files(directory: Path, remove_legends: bool) -> int:
     return changed
 
 
+def make_profile_tex_portable(text: str) -> str:
+    r"""Make RunnerPost profile TeX files compile on minimal TeX installs.
+
+    Some GERAD server images do not ship standalone.cls. RunnerPost may emit
+    profile figures with \documentclass{standalone}; replacing it with article
+    keeps the figure compilable without changing the pgfplots body.
+    """
+    text = re.sub(
+        r"\\documentclass(?:\[[^\]]*\])?\{standalone\}",
+        r"\\documentclass{article}",
+        text,
+        count=1,
+    )
+    if r"\usepackage[margin=1cm]{geometry}" not in text and r"\usepackage{geometry}" not in text:
+        text = text.replace(
+            r"\documentclass{article}",
+            "\\documentclass{article}\n\\usepackage[margin=1cm]{geometry}",
+            1,
+        )
+    if r"\pagestyle{empty}" not in text:
+        text = text.replace(r"\begin{document}", "\\pagestyle{empty}\n\\begin{document}", 1)
+    if r"\definecolor{orange}" not in text:
+        text = text.replace(
+            r"\begin{document}",
+            "\\definecolor{orange}{rgb}{1,0.5,0}\n\\begin{document}",
+            1,
+        )
+    return text
+
+
+def latex_escape(text: str) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(char, char) for char in text)
+
+
 def run_runnerpost(runnerpost_exe: Path, sync_dir: Path) -> None:
     subprocess.run(
         [
@@ -370,14 +426,70 @@ def run_runnerpost(runnerpost_exe: Path, sync_dir: Path) -> None:
     )
 
 
-def compile_tex(sync_dir: Path, pdf_dir: str) -> None:
+def write_main_tex(sync_dir: Path, pdf_dir: str, title: str) -> Path:
+    main_tex = sync_dir / "main.tex"
+    escaped_title = latex_escape(title)
+    main_tex.write_text(
+        rf"""\documentclass{{article}}
+\usepackage[margin=1cm,a4paper,landscape]{{geometry}}
+\usepackage{{graphicx}}
+\usepackage{{tikz}}
+\usepackage{{pgfplots}}
+\usepackage{{xcolor}}
+\pgfplotsset{{compat=newest}}
+\pagestyle{{empty}}
+\definecolor{{orange}}{{rgb}}{{1,0.5,0}}
+
+\begin{{document}}
+\begin{{center}}
+{{\Large \textbf{{{escaped_title}}}}}\\[2ex]
+\begin{{tabular}}{{ccc}}
+    \multicolumn{{3}}{{c}}{{\Large \textbf{{Data Profiles}}}} \\[2ex]
+    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/dp_1e-1}} &
+    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/dp_1e-3}} &
+    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/dp_1e-5}} \\
+    \rule{{0pt}}{{6ex}} & & \\[-2ex]
+    \multicolumn{{3}}{{c}}{{
+        \fbox{{
+            \begin{{tabular}}{{cl@{{\hspace{{8mm}}}}cl@{{\hspace{{8mm}}}}cl}}
+                \tikz[baseline=-0.5ex]{{\draw[blue, thick] plot[mark=square] coordinates {{(-0.3,0) (0.3,0)}};}} & QUADRATIC MODEL &
+                \tikz[baseline=-0.5ex]{{\draw[orange, thick] plot[mark=*] coordinates {{(-0.3,0) (0.3,0)}};}} & RANDOM &
+                \tikz[baseline=-0.5ex]{{\draw[green!70!black, ultra thick] plot[mark=star] coordinates {{(-0.3,0) (0.3,0)}};}} & \textbf{{OMNISCIENT}} \\
+                \rule{{0pt}}{{4ex}}
+                \tikz[baseline=-0.5ex]{{\draw[magenta, thick] plot[mark=triangle] coordinates {{(-0.3,0) (0.3,0)}};}} & LEXICOGRAPHICAL &
+                \tikz[baseline=-0.5ex]{{\draw[red, thick] plot[mark=diamond] coordinates {{(-0.3,0) (0.3,0)}};}} & DIR LAST SUCCESS &
+                \tikz[baseline=-0.5ex]{{\draw[black, thick, dashed] plot[mark=x] coordinates {{(-0.3,0) (0.3,0)}};}} & \textbf{{REVERSE OMNI}} \\
+            \end{{tabular}}
+        }}
+    }} \\
+    \rule{{0pt}}{{8ex}} & & \\[-2ex]
+    \multicolumn{{3}}{{c}}{{\Large \textbf{{Performance Profiles}}}} \\[2ex]
+    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/pp_1e-1}} &
+    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/pp_1e-3}} &
+    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/pp_1e-5}} \\
+\end{{tabular}}
+\end{{center}}
+\end{{document}}
+""",
+        encoding="utf-8",
+    )
+    return main_tex
+
+
+def compile_tex(sync_dir: Path, pdf_dir: str, figure_title: str) -> None:
     tex_files = sorted(sync_dir.glob("dp*.tex")) + sorted(sync_dir.glob("pp*.tex"))
     for tex_file in tex_files:
+        text = tex_file.read_text(encoding="utf-8")
+        portable = make_profile_tex_portable(text)
+        if portable != text:
+            tex_file.write_text(portable, encoding="utf-8")
         subprocess.run(["pdflatex", "-interaction=nonstopmode", tex_file.name], cwd=sync_dir, check=True)
     output_dir = sync_dir / pdf_dir
     output_dir.mkdir(exist_ok=True)
     for pdf_file in sorted(sync_dir.glob("dp*.pdf")) + sorted(sync_dir.glob("pp*.pdf")):
         shutil.move(str(pdf_file), output_dir / pdf_file.name)
+    write_main_tex(sync_dir, pdf_dir, figure_title)
+    subprocess.run(["pdflatex", "-interaction=nonstopmode", "main.tex"], cwd=sync_dir, check=True)
 
 
 def evaluate_external_bb(
@@ -633,7 +745,7 @@ def command_runnerpost(args: argparse.Namespace) -> None:
         changed = style_tex_files(args.sync_dir.resolve(), remove_legends=args.remove_legends)
         print(f"styled tex files: {changed}")
     if args.compile_tex:
-        compile_tex(args.sync_dir.resolve(), args.pdf_dir)
+        compile_tex(args.sync_dir.resolve(), args.pdf_dir, args.figure_title)
 
 
 def command_all(args: argparse.Namespace) -> None:
@@ -662,7 +774,7 @@ def command_all(args: argparse.Namespace) -> None:
             changed = style_tex_files(sync_dir, remove_legends=args.remove_legends)
             print(f"styled tex files: {changed}")
         if args.compile_tex:
-            compile_tex(sync_dir, args.pdf_dir)
+            compile_tex(sync_dir, args.pdf_dir, args.figure_title)
 
 
 def add_common_strategy_arg(parser: argparse.ArgumentParser) -> None:
@@ -738,6 +850,7 @@ def build_parser() -> argparse.ArgumentParser:
     runnerpost_parser.add_argument("--remove-legends", action="store_true")
     runnerpost_parser.add_argument("--compile-tex", action="store_true")
     runnerpost_parser.add_argument("--pdf-dir", default="pdfs")
+    runnerpost_parser.add_argument("--figure-title", default="More-Wild ordering profiles")
     runnerpost_parser.set_defaults(func=command_runnerpost)
 
     all_parser = subparsers.add_parser("all", help="Run the complete pipeline.")
@@ -749,6 +862,7 @@ def build_parser() -> argparse.ArgumentParser:
     all_parser.add_argument("--remove-legends", action="store_true")
     all_parser.add_argument("--compile-tex", action="store_true")
     all_parser.add_argument("--pdf-dir", default="pdfs")
+    all_parser.add_argument("--figure-title", default="More-Wild ordering profiles")
     add_common_strategy_arg(all_parser)
     add_sync_args(all_parser)
     add_simulation_args(all_parser, require_bb_exe=False)
