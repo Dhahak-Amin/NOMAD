@@ -337,34 +337,58 @@ def write_runnerpost_defs(
             )
 
 
-def style_tex_files(directory: Path, remove_legends: bool) -> int:
+def style_tex_files(directory: Path, remove_legends: bool = True) -> int:
     changed = 0
-    addplot_pattern = re.compile(
-        r"\\addplot\s*\[[^\]]*\]\s*table(?=[^;]*y index\s*=\s*(\d+))",
-        re.DOTALL,
-    )
     for tex_file in sorted(directory.glob("*.tex")):
         text = tex_file.read_text(encoding="utf-8")
         original = text
-        text = text.replace("\u00a0", " ")
+        text = apply_runnerpost_tex_fixes(text, remove_legends=remove_legends)
+        text = style_addplot_commands(text)
         text = make_profile_tex_portable(text)
-
-        def replace_addplot(match: re.Match[str]) -> str:
-            y_index = int(match.group(1))
-            style = TEX_STYLES_BY_Y_INDEX.get(y_index)
-            if style is None:
-                return match.group(0)
-            return rf"\addplot [{style}] table"
-
-        text = addplot_pattern.sub(replace_addplot, text)
-        if remove_legends:
-            text = re.sub(r"^.*\\addlegendentry.*\n?", "", text, flags=re.MULTILINE)
-            text = re.sub(r"^.*\\legend.*\n?", "", text, flags=re.MULTILINE)
 
         if text != original:
             tex_file.write_text(text, encoding="utf-8")
             changed += 1
     return changed
+
+
+def apply_runnerpost_tex_fixes(text: str, *, remove_legends: bool) -> str:
+    """Apply the same cleanup as the historical sed post-processing block."""
+    text = text.replace("\u00a0", " ")
+    text = text.replace(r"\_", "_")
+
+    fixed_lines = []
+    for line in text.splitlines(keepends=True):
+        if "title" in line:
+            line = line.replace("_", r"\_")
+        fixed_lines.append(line)
+    text = "".join(fixed_lines)
+
+    if remove_legends:
+        text = re.sub(r"^.*\\addlegendentry.*\n?", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^.*\\legend.*\n?", "", text, flags=re.MULTILINE)
+    return text
+
+
+def style_addplot_commands(text: str) -> str:
+    """Style each RunnerPost addplot command according to its y index."""
+
+    def replace_command(match: re.Match[str]) -> str:
+        command = match.group(0)
+        y_match = re.search(r"y\s*index\s*=\s*(\d+)", command)
+        if y_match is None:
+            return command
+        style = TEX_STYLES_BY_Y_INDEX.get(int(y_match.group(1)))
+        if style is None:
+            return command
+        return re.sub(
+            r"\\addplot\s*\[[^\]]*\]\s*table",
+            rf"\\addplot [{style}] table",
+            command,
+            count=1,
+        )
+
+    return re.sub(r"\\addplot\b.*?;", replace_command, text, flags=re.DOTALL)
 
 
 def make_profile_tex_portable(text: str) -> str:
@@ -394,6 +418,7 @@ def make_profile_tex_portable(text: str) -> str:
             "\\definecolor{orange}{rgb}{1,0.5,0}\n\\begin{document}",
             1,
         )
+    text = re.sub(r"^.*\\standaloneconfig.*\n?", "", text, flags=re.MULTILINE)
     return text
 
 
@@ -426,7 +451,7 @@ def run_runnerpost(runnerpost_exe: Path, sync_dir: Path) -> None:
     )
 
 
-def write_main_tex(sync_dir: Path, pdf_dir: str, title: str) -> Path:
+def write_main_tex(sync_dir: Path, pdf_dir: str, title: str, plot_width: str) -> Path:
     main_tex = sync_dir / "main.tex"
     escaped_title = latex_escape(title)
     main_tex.write_text(
@@ -445,9 +470,9 @@ def write_main_tex(sync_dir: Path, pdf_dir: str, title: str) -> Path:
 {{\Large \textbf{{{escaped_title}}}}}\\[2ex]
 \begin{{tabular}}{{ccc}}
     \multicolumn{{3}}{{c}}{{\Large \textbf{{Data Profiles}}}} \\[2ex]
-    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/dp_1e-1}} &
-    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/dp_1e-3}} &
-    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/dp_1e-5}} \\
+    \includegraphics[width={plot_width}]{{{pdf_dir}/dp_1e-1}} &
+    \includegraphics[width={plot_width}]{{{pdf_dir}/dp_1e-3}} &
+    \includegraphics[width={plot_width}]{{{pdf_dir}/dp_1e-5}} \\
     \rule{{0pt}}{{6ex}} & & \\[-2ex]
     \multicolumn{{3}}{{c}}{{
         \fbox{{
@@ -464,9 +489,9 @@ def write_main_tex(sync_dir: Path, pdf_dir: str, title: str) -> Path:
     }} \\
     \rule{{0pt}}{{8ex}} & & \\[-2ex]
     \multicolumn{{3}}{{c}}{{\Large \textbf{{Performance Profiles}}}} \\[2ex]
-    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/pp_1e-1}} &
-    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/pp_1e-3}} &
-    \includegraphics[width=0.30\textwidth]{{{pdf_dir}/pp_1e-5}} \\
+    \includegraphics[width={plot_width}]{{{pdf_dir}/pp_1e-1}} &
+    \includegraphics[width={plot_width}]{{{pdf_dir}/pp_1e-3}} &
+    \includegraphics[width={plot_width}]{{{pdf_dir}/pp_1e-5}} \\
 \end{{tabular}}
 \end{{center}}
 \end{{document}}
@@ -476,7 +501,63 @@ def write_main_tex(sync_dir: Path, pdf_dir: str, title: str) -> Path:
     return main_tex
 
 
-def compile_tex(sync_dir: Path, pdf_dir: str, figure_title: str) -> None:
+def copy_template_files(template_dir: Path, sync_dir: Path, pdf_dir: str, plot_width: str) -> bool:
+    if not template_dir.exists():
+        raise FileNotFoundError(f"template directory does not exist: {template_dir}")
+
+    copied_main = False
+    for filename in ("defs.tex", "main.tex"):
+        source = template_dir / filename
+        if source.exists():
+            shutil.copy(source, sync_dir / filename)
+            copied_main = copied_main or filename == "main.tex"
+
+    if copied_main:
+        main_path = sync_dir / "main.tex"
+        text = main_path.read_text(encoding="utf-8")
+        text = make_main_tex_portable(text)
+        text = resize_main_tex_graphics(text, plot_width)
+        text = text.replace("pdfs/", f"{pdf_dir}/")
+        main_path.write_text(text, encoding="utf-8")
+    return copied_main
+
+
+def make_main_tex_portable(text: str) -> str:
+    text = re.sub(
+        r"\\documentclass(?:\[[^\]]*\])?\{standalone\}",
+        r"\\documentclass{article}",
+        text,
+        count=1,
+    )
+    if r"\documentclass{article}" in text and r"\usepackage[margin=1cm,a4paper,landscape]{geometry}" not in text:
+        text = text.replace(
+            r"\documentclass{article}",
+            "\\documentclass{article}\n\\usepackage[margin=1cm,a4paper,landscape]{geometry}",
+            1,
+        )
+    if r"\pagestyle{empty}" not in text:
+        text = text.replace(r"\begin{document}", "\\pagestyle{empty}\n\\begin{document}", 1)
+    text = re.sub(r"^.*\\standaloneconfig.*\n?", "", text, flags=re.MULTILINE)
+    return text
+
+
+def resize_main_tex_graphics(text: str, plot_width: str) -> str:
+    return re.sub(
+        r"width\s*=\s*0\.\d+\\textwidth",
+        lambda _: f"width={plot_width}",
+        text,
+    )
+
+
+def compile_tex(
+    sync_dir: Path,
+    pdf_dir: str,
+    figure_title: str,
+    *,
+    template_dir: Path | None,
+    main_plot_width: str,
+) -> None:
+    style_tex_files(sync_dir, remove_legends=True)
     tex_files = sorted(sync_dir.glob("dp*.tex")) + sorted(sync_dir.glob("pp*.tex"))
     for tex_file in tex_files:
         text = tex_file.read_text(encoding="utf-8")
@@ -488,7 +569,12 @@ def compile_tex(sync_dir: Path, pdf_dir: str, figure_title: str) -> None:
     output_dir.mkdir(exist_ok=True)
     for pdf_file in sorted(sync_dir.glob("dp*.pdf")) + sorted(sync_dir.glob("pp*.pdf")):
         shutil.move(str(pdf_file), output_dir / pdf_file.name)
-    write_main_tex(sync_dir, pdf_dir, figure_title)
+
+    copied_main = False
+    if template_dir is not None:
+        copied_main = copy_template_files(template_dir, sync_dir, pdf_dir, main_plot_width)
+    if not copied_main:
+        write_main_tex(sync_dir, pdf_dir, figure_title, main_plot_width)
     subprocess.run(["pdflatex", "-interaction=nonstopmode", "main.tex"], cwd=sync_dir, check=True)
 
 
@@ -742,10 +828,16 @@ def command_sync(args: argparse.Namespace) -> None:
 def command_runnerpost(args: argparse.Namespace) -> None:
     run_runnerpost(args.runnerpost_exe.resolve(), args.sync_dir.resolve())
     if args.style_tex:
-        changed = style_tex_files(args.sync_dir.resolve(), remove_legends=args.remove_legends)
+        changed = style_tex_files(args.sync_dir.resolve(), remove_legends=not args.keep_legends)
         print(f"styled tex files: {changed}")
     if args.compile_tex:
-        compile_tex(args.sync_dir.resolve(), args.pdf_dir, args.figure_title)
+        compile_tex(
+            args.sync_dir.resolve(),
+            args.pdf_dir,
+            args.figure_title,
+            template_dir=args.template_dir.resolve() if args.template_dir else None,
+            main_plot_width=args.main_plot_width,
+        )
 
 
 def command_all(args: argparse.Namespace) -> None:
@@ -771,10 +863,16 @@ def command_all(args: argparse.Namespace) -> None:
     if args.runnerpost_exe:
         run_runnerpost(args.runnerpost_exe.resolve(), sync_dir)
         if args.style_tex:
-            changed = style_tex_files(sync_dir, remove_legends=args.remove_legends)
+            changed = style_tex_files(sync_dir, remove_legends=not args.keep_legends)
             print(f"styled tex files: {changed}")
         if args.compile_tex:
-            compile_tex(sync_dir, args.pdf_dir, args.figure_title)
+            compile_tex(
+                sync_dir,
+                args.pdf_dir,
+                args.figure_title,
+                template_dir=args.template_dir.resolve() if args.template_dir else None,
+                main_plot_width=args.main_plot_width,
+            )
 
 
 def add_common_strategy_arg(parser: argparse.ArgumentParser) -> None:
@@ -848,9 +946,12 @@ def build_parser() -> argparse.ArgumentParser:
     runnerpost_parser.add_argument("--sync-dir", type=Path, required=True)
     runnerpost_parser.add_argument("--style-tex", action="store_true")
     runnerpost_parser.add_argument("--remove-legends", action="store_true")
+    runnerpost_parser.add_argument("--keep-legends", action="store_true")
     runnerpost_parser.add_argument("--compile-tex", action="store_true")
     runnerpost_parser.add_argument("--pdf-dir", default="pdfs")
     runnerpost_parser.add_argument("--figure-title", default="More-Wild ordering profiles")
+    runnerpost_parser.add_argument("--template-dir", type=Path)
+    runnerpost_parser.add_argument("--main-plot-width", default=r"0.32\textwidth")
     runnerpost_parser.set_defaults(func=command_runnerpost)
 
     all_parser = subparsers.add_parser("all", help="Run the complete pipeline.")
@@ -860,9 +961,12 @@ def build_parser() -> argparse.ArgumentParser:
     all_parser.add_argument("--runnerpost-exe", type=Path)
     all_parser.add_argument("--style-tex", action="store_true")
     all_parser.add_argument("--remove-legends", action="store_true")
+    all_parser.add_argument("--keep-legends", action="store_true")
     all_parser.add_argument("--compile-tex", action="store_true")
     all_parser.add_argument("--pdf-dir", default="pdfs")
     all_parser.add_argument("--figure-title", default="More-Wild ordering profiles")
+    all_parser.add_argument("--template-dir", type=Path)
+    all_parser.add_argument("--main-plot-width", default=r"0.32\textwidth")
     add_common_strategy_arg(all_parser)
     add_sync_args(all_parser)
     add_simulation_args(all_parser, require_bb_exe=False)
