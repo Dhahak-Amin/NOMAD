@@ -26,6 +26,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -391,9 +392,20 @@ def evaluate_external_bb(
     counter: int,
     fail_value: float,
     keep_eval_files: bool,
+    eval_tmp_dir: Path | None,
 ) -> float:
-    x_file = run_dir / f"{prefix}_{counter}.txt"
-    x_file.write_text(" ".join(f"{value:.17g}" for value in x) + "\n", encoding="utf-8")
+    work_dir = eval_tmp_dir or run_dir
+    work_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix=f"{prefix}_{counter}_",
+        suffix=".txt",
+        dir=work_dir,
+        delete=False,
+    ) as handle:
+        x_file = Path(handle.name)
+        handle.write(" ".join(f"{value:.17g}" for value in x) + "\n")
     try:
         completed = subprocess.run(
             [str(bb_exe), str(x_file), str(instance), str(variant)],
@@ -429,6 +441,7 @@ def make_callback(
     prefix: str,
     fail_value: float,
     keep_eval_files: bool,
+    eval_tmp_dir: Path | None,
     reverse: bool = False,
 ):
     counter = {"value": 0}
@@ -447,6 +460,7 @@ def make_callback(
             counter=counter["value"],
             fail_value=fail_value,
             keep_eval_files=keep_eval_files,
+            eval_tmp_dir=eval_tmp_dir,
         )
         if reverse:
             value = -value
@@ -471,6 +485,7 @@ def run_py_nomad_task(task: tuple) -> str:
         max_bb_eval,
         fail_value,
         keep_eval_files,
+        eval_tmp_dir_s,
     ) = task
 
     import numpy as np
@@ -480,6 +495,9 @@ def run_py_nomad_task(task: tuple) -> str:
     bb_exe = Path(bb_exe_s)
     run_dir = results_dir / f"MW_{instance}_{sub_id}" / strategy
     run_dir.mkdir(parents=True, exist_ok=True)
+    eval_tmp_dir = None
+    if eval_tmp_dir_s:
+        eval_tmp_dir = Path(eval_tmp_dir_s) / f"MW_{instance}_{sub_id}" / strategy
 
     random_state = np.random.RandomState(seed)
     x0 = [float(value) for value in random_state.uniform(-1.0, 1.0, size=dim)]
@@ -521,6 +539,7 @@ def run_py_nomad_task(task: tuple) -> str:
         prefix="x_bb",
         fail_value=fail_value,
         keep_eval_files=keep_eval_files,
+        eval_tmp_dir=eval_tmp_dir,
     )
 
     previous_cwd = Path.cwd()
@@ -537,6 +556,7 @@ def run_py_nomad_task(task: tuple) -> str:
                 prefix="x_surr",
                 fail_value=fail_value,
                 keep_eval_files=keep_eval_files,
+                eval_tmp_dir=eval_tmp_dir,
                 reverse=(strategy == "REVERSE_OMNI"),
             )
             result = PyNomad.optimize(bb_callback, x0, [], [], params, surrogate_callback)
@@ -578,6 +598,7 @@ def simulate(args: argparse.Namespace) -> None:
                         args.max_bb_eval,
                         args.fail_value,
                         args.keep_eval_files,
+                        str(args.eval_tmp_dir.resolve()) if args.eval_tmp_dir else "",
                     )
                 )
 
@@ -681,6 +702,11 @@ def add_simulation_args(parser: argparse.ArgumentParser, *, require_bb_exe: bool
     parser.add_argument("--workers", type=positive_int, default=max(os.cpu_count() or 1, 1))
     parser.add_argument("--fail-value", type=float, default=1e20)
     parser.add_argument("--keep-eval-files", action="store_true")
+    parser.add_argument(
+        "--eval-tmp-dir",
+        type=Path,
+        help="Directory for transient blackbox input files; useful on quota-limited home filesystems.",
+    )
     parser.add_argument("--clean", action="store_true")
 
 
