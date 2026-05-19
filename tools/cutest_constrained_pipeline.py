@@ -358,7 +358,7 @@ def run_task(task: tuple) -> str:
     try:
         Path("x0.txt").write_text(" ".join(f"{value:.17g}" for value in x0) + "\n", encoding="utf-8")
 
-        target_points = max(10, 4 * dim)
+        target_points = min(200, max(10, 4 * dim))
         output_types = " ".join(["OBJ"] + ["PB"] * pb_count)
         params = [
             f"BB_OUTPUT_TYPE {output_types}",
@@ -451,7 +451,7 @@ def simulate(args: argparse.Namespace) -> None:
                 print(f"skip unconstrained CUTEst problem: {problem_name}", flush=True)
                 continue
             raise ValueError(f"{problem_name}: no finite CUTEst constraints were found")
-        if info["n"] > args.max_dim:
+        if info["n"] < args.min_dim or info["n"] > args.max_dim:
             continue
         metadata[problem_name] = info
 
@@ -660,6 +660,7 @@ def add_sim_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--auto-prefix", default="HS")
     parser.add_argument("--auto-count", type=positive_int, default=40)
+    parser.add_argument("--min-dim", type=positive_int, default=1)
     parser.add_argument("--max-dim", type=positive_int, default=10)
     parser.add_argument("--n-subinstances", type=positive_int, default=2)
     parser.add_argument("--seed-stride", type=positive_int, default=123)
