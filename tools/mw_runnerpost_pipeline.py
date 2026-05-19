@@ -337,9 +337,13 @@ def write_runnerpost_defs(
             )
 
 
+def profile_tex_files(directory: Path) -> list[Path]:
+    return sorted(directory.glob("dp*.tex")) + sorted(directory.glob("pp*.tex"))
+
+
 def style_tex_files(directory: Path, remove_legends: bool = True) -> int:
     changed = 0
-    for tex_file in sorted(directory.glob("*.tex")):
+    for tex_file in profile_tex_files(directory):
         text = tex_file.read_text(encoding="utf-8")
         original = text
         text = apply_runnerpost_tex_fixes(text, remove_legends=remove_legends)
@@ -399,23 +403,31 @@ def make_profile_tex_portable(text: str) -> str:
     keeps the figure compilable without changing the pgfplots body.
     """
     text = re.sub(
-        r"\\documentclass(?:\[[^\]]*\])?\{standalone\}",
+        r"\\documentclass(?:\[[^\]]*\])?\{(?:standalone|article)\}",
         r"\\documentclass{article}",
         text,
         count=1,
     )
-    if r"\usepackage[margin=1cm]{geometry}" not in text and r"\usepackage{geometry}" not in text:
-        text = text.replace(
-            r"\documentclass{article}",
-            "\\documentclass{article}\n\\usepackage[margin=1cm]{geometry}",
-            1,
-        )
+    text = re.sub(r"^\\usepackage(?:\[[^\]]*\])?\{geometry\}\n?", "", text, flags=re.MULTILINE)
+    text = text.replace(
+        r"\documentclass{article}",
+        "\\documentclass{article}\n"
+        "\\usepackage[paperwidth=11cm,paperheight=8cm,margin=0.15cm]{geometry}",
+        1,
+    )
     if r"\pagestyle{empty}" not in text:
         text = text.replace(r"\begin{document}", "\\pagestyle{empty}\n\\begin{document}", 1)
     if r"\definecolor{orange}" not in text:
         text = text.replace(
             r"\begin{document}",
             "\\definecolor{orange}{rgb}{1,0.5,0}\n\\begin{document}",
+            1,
+        )
+    if "every axis/.append style" not in text:
+        text = text.replace(
+            r"\begin{document}",
+            "\\pgfplotsset{every axis/.append style={width=9.8cm,height=6.6cm,scale only axis}}\n"
+            "\\begin{document}",
             1,
         )
     text = re.sub(r"^.*\\standaloneconfig.*\n?", "", text, flags=re.MULTILINE)
@@ -558,7 +570,7 @@ def compile_tex(
     main_plot_width: str,
 ) -> None:
     style_tex_files(sync_dir, remove_legends=True)
-    tex_files = sorted(sync_dir.glob("dp*.tex")) + sorted(sync_dir.glob("pp*.tex"))
+    tex_files = profile_tex_files(sync_dir)
     for tex_file in tex_files:
         text = tex_file.read_text(encoding="utf-8")
         portable = make_profile_tex_portable(text)
