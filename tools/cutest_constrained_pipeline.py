@@ -35,6 +35,10 @@ from typing import Iterable
 
 import numpy as np
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
 from mw_runnerpost_pipeline import compile_tex, run_runnerpost, style_tex_files
 
 
@@ -110,14 +114,21 @@ def import_cutest_problem(name: str):
     return pycutest.import_problem(name)
 
 
-def problem_bounds(problem) -> tuple[list[float], list[float]]:
-    lower = [finite_bound(value, -1e20) for value in getattr(problem, "bl", [])]
-    upper = [finite_bound(value, 1e20) for value in getattr(problem, "bu", [])]
-    return lower, upper
+def variable_bounds_to_pb(problem, x: list[float] | np.ndarray) -> list[float]:
+    """Convert finite variable bounds bl <= x <= bu to PB values g(x) <= 0."""
+    x_array = np.asarray(x, dtype=float)
+    values: list[float] = []
+    for x_value, lower, upper in zip(x_array, getattr(problem, "bl", []), getattr(problem, "bu", [])):
+        x_float = float(x_value)
+        if math.isfinite(float(lower)):
+            values.append(float(lower) - x_float)
+        if math.isfinite(float(upper)):
+            values.append(x_float - float(upper))
+    return values
 
 
-def cutest_constraints_to_pb(problem, x: list[float]) -> list[float]:
-    """Convert CUTEst bounds cl <= c(x) <= cu to NOMAD PB values g(x) <= 0."""
+def nonlinear_constraints_to_pb(problem, x: list[float] | np.ndarray) -> list[float]:
+    """Convert CUTEst nonlinear bounds cl <= c(x) <= cu to PB values g(x) <= 0."""
     if getattr(problem, "m", 0) == 0:
         return []
     x_array = np.asarray(x, dtype=float)
@@ -130,6 +141,11 @@ def cutest_constraints_to_pb(problem, x: list[float]) -> list[float]:
         if math.isfinite(float(upper)):
             values.append(c_float - float(upper))
     return values
+
+
+def cutest_constraints_to_pb(problem, x: list[float] | np.ndarray) -> list[float]:
+    """Convert all finite CUTEst bounds/constraints to NOMAD PB values g(x) <= 0."""
+    return variable_bounds_to_pb(problem, x) + nonlinear_constraints_to_pb(problem, x)
 
 
 def pb_violation(pb_values: Iterable[float]) -> float:
@@ -229,8 +245,6 @@ def run_task(task: tuple) -> str:
         dim,
         pb_count,
         x0,
-        lower,
-        upper,
         results_dir_s,
         max_bb_eval,
         seed,
@@ -273,9 +287,9 @@ def run_task(task: tuple) -> str:
         bb = make_bb(problem_name, dim, pb_count)
         if strategy in SURROGATE_STRATEGIES:
             surrogate = make_surrogate(problem_name, dim, pb_count, reverse=(strategy == "REVERSE_OMNI"))
-            PyNomad.optimize(bb, x0, lower, upper, params, surrogate)
+            PyNomad.optimize(bb, x0, [], [], params, surrogate)
         else:
-            PyNomad.optimize(bb, x0, lower, upper, params)
+            PyNomad.optimize(bb, x0, [], [], params)
 
         bbe, obj = last_stats_summary(Path("stats.txt"))
         return f"done {problem_name}_{sub_id} {strategy}: bbe={bbe} obj={obj}"
@@ -290,15 +304,12 @@ def inspect_problem(name: str) -> dict:
     x0_array = np.asarray(problem.x0, dtype=float)
     x0 = [float(value) for value in x0_array]
     pb_values = cutest_constraints_to_pb(problem, x0)
-    lower, upper = problem_bounds(problem)
     return {
         "name": name,
         "n": int(problem.n),
         "m_cutest": int(getattr(problem, "m", 0)),
         "m_pb": len(pb_values),
         "x0": x0,
-        "lower": lower,
-        "upper": upper,
     }
 
 
@@ -343,8 +354,6 @@ def simulate(args: argparse.Namespace) -> None:
                         info["n"],
                         info["m_pb"],
                         info["x0"],
-                        info["lower"],
-                        info["upper"],
                         str(results_dir),
                         args.max_bb_eval,
                         seed,
