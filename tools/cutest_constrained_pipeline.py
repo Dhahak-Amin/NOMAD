@@ -49,21 +49,16 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 
 
 DEFAULT_PROBLEMS = [
-    "HS21",
-    "HS24",
-    "HS35",
-    "HS44",
-    "HS52",
-    "HS71",
-    "HS76",
-    "HS100",
-    "HS108",
-    "HS110",
-    "HS111",
-    "HS112",
-    "HS113",
-    "HS114",
-    "HS118",
+    "HS21", "HS22", "HS23", "HS24", "HS26", "HS27", "HS28", "HS29", "HS30",
+    "HS31", "HS32", "HS33", "HS34", "HS35", "HS36", "HS37", "HS43", "HS44",
+    "HS46", "HS47", "HS48", "HS49", "HS50", "HS51", "HS52", "HS53", "HS54",
+    "HS55", "HS56", "HS57", "HS60", "HS61", "HS62", "HS63", "HS64", "HS65",
+    "HS66", "HS67", "HS68", "HS69", "HS70", "HS71", "HS72", "HS73", "HS74",
+    "HS75", "HS76", "HS77", "HS78", "HS79", "HS80", "HS81", "HS83", "HS84",
+    "HS85", "HS86", "HS87", "HS88", "HS89", "HS90", "HS91", "HS93", "HS95",
+    "HS96", "HS97", "HS98", "HS99", "HS100", "HS106", "HS107", "HS108",
+    "HS109", "HS110", "HS111", "HS112", "HS113", "HS114", "HS116", "HS117",
+    "HS118", "HS119",
 ]
 
 STRATEGIES: dict[str, str] = {
@@ -114,6 +109,15 @@ def import_cutest_problem(name: str):
     return pycutest.import_problem(name)
 
 
+def available_cutest_problem_names() -> list[str]:
+    import pycutest
+
+    try:
+        return sorted(str(name).upper() for name in pycutest.find_problems())
+    except Exception:
+        return DEFAULT_PROBLEMS
+
+
 def variable_bounds_to_pb(problem, x: list[float] | np.ndarray) -> list[float]:
     """Convert finite variable bounds bl <= x <= bu to PB values g(x) <= 0."""
     x_array = np.asarray(x, dtype=float)
@@ -150,6 +154,99 @@ def cutest_constraints_to_pb(problem, x: list[float] | np.ndarray) -> list[float
 
 def pb_violation(pb_values: Iterable[float]) -> float:
     return sum(max(value, 0.0) ** 2 for value in pb_values)
+
+
+def bound_sampling_box(problem, x0: list[float], radius: float) -> tuple[np.ndarray, np.ndarray]:
+    x0_array = np.asarray(x0, dtype=float)
+    lower = np.empty_like(x0_array)
+    upper = np.empty_like(x0_array)
+    for i, x0_value in enumerate(x0_array):
+        scale = max(1.0, abs(float(x0_value)))
+        fallback_lower = float(x0_value) - radius * scale
+        fallback_upper = float(x0_value) + radius * scale
+        bl = float(getattr(problem, "bl", [])[i])
+        bu = float(getattr(problem, "bu", [])[i])
+        lower[i] = bl if math.isfinite(bl) else fallback_lower
+        upper[i] = bu if math.isfinite(bu) else fallback_upper
+        if lower[i] > upper[i]:
+            lower[i], upper[i] = upper[i], lower[i]
+        if lower[i] == upper[i]:
+            lower[i] -= 1.0
+            upper[i] += 1.0
+    return lower, upper
+
+
+def unique_start(starts: list[list[float]], candidate: list[float], tol: float = 1e-10) -> bool:
+    candidate_array = np.asarray(candidate, dtype=float)
+    return all(np.linalg.norm(candidate_array - np.asarray(start, dtype=float), ord=np.inf) > tol for start in starts)
+
+
+def generate_initial_starts(
+    problem,
+    *,
+    n_starts: int,
+    mode: str,
+    seed: int,
+    candidate_count: int,
+    feasibility_tol: float,
+    radius: float,
+) -> tuple[list[list[float]], list[dict]]:
+    """Generate CUTEst starts, prioritizing feasible points when requested."""
+    x0 = [float(value) for value in np.asarray(problem.x0, dtype=float)]
+    starts: list[list[float]] = []
+    records: list[dict] = []
+
+    def add_start(candidate: list[float], source: str) -> None:
+        objective, _pb_values, h_value = evaluate_cutest(problem, candidate)
+        starts.append(candidate)
+        records.append({"source": source, "h": h_value, "f": objective})
+
+    x0_h = pb_violation(cutest_constraints_to_pb(problem, x0))
+    if mode in {"cutest", "mixed"} or x0_h <= feasibility_tol:
+        add_start(x0, "cutest_x0")
+
+    if mode == "cutest":
+        while len(starts) < n_starts:
+            add_start(x0, "cutest_x0_repeat")
+        return starts[:n_starts], records[:n_starts]
+
+    rng = np.random.default_rng(seed)
+    lower, upper = bound_sampling_box(problem, x0, radius)
+    feasible_pool: list[tuple[float, float, list[float]]] = []
+    infeasible_pool: list[tuple[float, float, list[float]]] = []
+
+    for _ in range(candidate_count):
+        candidate_array = rng.uniform(lower, upper)
+        candidate = [float(value) for value in candidate_array]
+        objective, _pb_values, h_value = evaluate_cutest(problem, candidate)
+        if h_value <= feasibility_tol:
+            feasible_pool.append((h_value, objective, candidate))
+        else:
+            infeasible_pool.append((h_value, objective, candidate))
+
+    feasible_pool.sort(key=lambda item: (item[0], item[1]))
+    infeasible_pool.sort(key=lambda item: (item[0], item[1]))
+
+    for h_value, objective, candidate in feasible_pool:
+        if len(starts) >= n_starts:
+            break
+        if unique_start(starts, candidate):
+            starts.append(candidate)
+            records.append({"source": "random_feasible", "h": h_value, "f": objective})
+
+    # If the random search cannot find enough feasible points, keep the best
+    # least-infeasible starts rather than silently reducing the benchmark size.
+    for h_value, objective, candidate in infeasible_pool:
+        if len(starts) >= n_starts:
+            break
+        if unique_start(starts, candidate):
+            starts.append(candidate)
+            records.append({"source": "least_infeasible_fallback", "h": h_value, "f": objective})
+
+    while len(starts) < n_starts:
+        add_start(x0, "cutest_x0_repeat")
+
+    return starts[:n_starts], records[:n_starts]
 
 
 def evaluate_cutest(problem, x: list[float]) -> tuple[float, list[float], float]:
@@ -299,17 +396,29 @@ def run_task(task: tuple) -> str:
         os.chdir(previous_cwd)
 
 
-def inspect_problem(name: str) -> dict:
+def inspect_problem(args: argparse.Namespace, name: str) -> dict:
     problem = import_cutest_problem(name)
     x0_array = np.asarray(problem.x0, dtype=float)
     x0 = [float(value) for value in x0_array]
     pb_values = cutest_constraints_to_pb(problem, x0)
+    starts, start_records = generate_initial_starts(
+        problem,
+        n_starts=args.n_subinstances,
+        mode=args.start_mode,
+        seed=args.start_seed,
+        candidate_count=args.candidate_starts,
+        feasibility_tol=args.feasibility_tol,
+        radius=args.start_radius,
+    )
     return {
         "name": name,
         "n": int(problem.n),
         "m_cutest": int(getattr(problem, "m", 0)),
         "m_pb": len(pb_values),
         "x0": x0,
+        "x0_h": pb_violation(pb_values),
+        "starts": starts,
+        "start_records": start_records,
     }
 
 
@@ -319,10 +428,16 @@ def simulate(args: argparse.Namespace) -> None:
         shutil.rmtree(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
+    problem_names = args.problems
+    if args.auto_select_constrained:
+        problem_names = [name for name in available_cutest_problem_names() if name.startswith(args.auto_prefix.upper())]
+
     metadata: dict[str, dict] = {}
-    for problem_name in args.problems:
+    for problem_name in problem_names:
+        if args.auto_select_constrained and len(metadata) >= args.auto_count:
+            break
         try:
-            info = inspect_problem(problem_name)
+            info = inspect_problem(args, problem_name)
         except Exception as exc:
             if args.skip_missing:
                 print(
@@ -336,13 +451,27 @@ def simulate(args: argparse.Namespace) -> None:
                 print(f"skip unconstrained CUTEst problem: {problem_name}", flush=True)
                 continue
             raise ValueError(f"{problem_name}: no finite CUTEst constraints were found")
+        if info["n"] > args.max_dim:
+            continue
         metadata[problem_name] = info
+
+    if not metadata:
+        raise ValueError("no constrained CUTEst problems selected")
+
+    print("Selected CUTEst problems:", ", ".join(metadata), flush=True)
+    for problem_name, info in metadata.items():
+        n_feas = sum(1 for record in info["start_records"] if record["h"] <= args.feasibility_tol)
+        print(
+            f"  {problem_name}: n={info['n']} m_pb={info['m_pb']} "
+            f"starts={len(info['starts'])} feasible_starts={n_feas}",
+            flush=True,
+        )
 
     (results_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
     tasks = []
     for problem_name, info in metadata.items():
-        for sub_id in range(1, args.n_subinstances + 1):
+        for sub_id, x0 in enumerate(info["starts"], start=1):
             seed = sub_id * args.seed_stride
             for strategy, sort_type in STRATEGIES.items():
                 tasks.append(
@@ -353,7 +482,7 @@ def simulate(args: argparse.Namespace) -> None:
                         sort_type,
                         info["n"],
                         info["m_pb"],
-                        info["x0"],
+                        x0,
                         str(results_dir),
                         args.max_bb_eval,
                         seed,
@@ -524,6 +653,14 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 def add_sim_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--results-dir", type=Path, required=True)
     parser.add_argument("--problems", type=parse_problem_list, default=DEFAULT_PROBLEMS)
+    parser.add_argument(
+        "--auto-select-constrained",
+        action="store_true",
+        help="Select available constrained CUTEst problems automatically.",
+    )
+    parser.add_argument("--auto-prefix", default="HS")
+    parser.add_argument("--auto-count", type=positive_int, default=40)
+    parser.add_argument("--max-dim", type=positive_int, default=10)
     parser.add_argument("--n-subinstances", type=positive_int, default=2)
     parser.add_argument("--seed-stride", type=positive_int, default=123)
     parser.add_argument("--max-bb-eval", type=positive_int, default=500)
@@ -531,6 +668,16 @@ def add_sim_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mp-context", choices=["spawn", "forkserver", "fork"], default="spawn")
     parser.add_argument("--skip-missing", action="store_true")
     parser.add_argument("--skip-unconstrained", action="store_true", default=True)
+    parser.add_argument(
+        "--start-mode",
+        choices=["cutest", "feasible", "mixed"],
+        default="feasible",
+        help="cutest: repeat CUTEst x0; feasible: random feasible starts first; mixed: include CUTEst x0 plus random feasible starts.",
+    )
+    parser.add_argument("--start-seed", type=int, default=20240519)
+    parser.add_argument("--candidate-starts", type=positive_int, default=2000)
+    parser.add_argument("--feasibility-tol", type=float, default=1e-8)
+    parser.add_argument("--start-radius", type=float, default=5.0)
     parser.add_argument("--clean", action="store_true")
 
 
