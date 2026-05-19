@@ -94,10 +94,29 @@ def parse_problem_list(spec: str) -> list[str]:
     return [part.strip().upper() for part in spec.split(",") if part.strip()]
 
 
-def import_cutest_problem(name: str):
+def sif_params_from_args(args: argparse.Namespace | None) -> dict:
+    if args is None or args.sif_n is None:
+        return {}
+    # Several unconstrained CUTEst SIF files use N; harmlessly skipped if the
+    # problem does not accept it through the import fallback below.
+    return {"N": int(args.sif_n)}
+
+
+def import_cutest_problem(name: str, sif_params: dict | None = None):
     import pycutest
 
+    if sif_params:
+        try:
+            return pycutest.import_problem(name, sifParams=sif_params)
+        except Exception:
+            pass
     return pycutest.import_problem(name)
+
+
+def available_cutest_problem_names() -> list[str]:
+    import pycutest
+
+    return sorted(str(name).upper() for name in pycutest.find_problems())
 
 
 def is_effective_finite_bound(value: float) -> bool:
@@ -135,8 +154,8 @@ def bbo_string(value: float) -> bytes:
     return f"{value:.17g}".encode("UTF-8")
 
 
-def make_bb(problem_name: str, dim: int):
-    problem = import_cutest_problem(problem_name)
+def make_bb(problem_name: str, dim: int, sif_params: dict | None):
+    problem = import_cutest_problem(problem_name, sif_params)
 
     def bb(opt_param):
         x = [opt_param.get_coord(i) for i in range(dim)]
@@ -146,8 +165,8 @@ def make_bb(problem_name: str, dim: int):
     return bb
 
 
-def make_surrogate(problem_name: str, dim: int, *, reverse: bool):
-    problem = import_cutest_problem(problem_name)
+def make_surrogate(problem_name: str, dim: int, sif_params: dict | None, *, reverse: bool):
+    problem = import_cutest_problem(problem_name, sif_params)
 
     def surrogate(opt_param):
         x = [opt_param.get_coord(i) for i in range(dim)]
@@ -227,6 +246,7 @@ def run_task(task: tuple) -> str:
         sort_type,
         dim,
         x0,
+        sif_params,
         results_dir_s,
         max_bb_eval,
         seed,
@@ -265,9 +285,14 @@ def run_task(task: tuple) -> str:
             "LH_SEARCH 0 0",
         ]
 
-        bb = make_bb(problem_name, dim)
+        bb = make_bb(problem_name, dim, sif_params)
         if strategy in SURROGATE_STRATEGIES:
-            surrogate = make_surrogate(problem_name, dim, reverse=(strategy == "REVERSE_OMNI"))
+            surrogate = make_surrogate(
+                problem_name,
+                dim,
+                sif_params,
+                reverse=(strategy == "REVERSE_OMNI"),
+            )
             PyNomad.optimize(bb, x0, [], [], params, surrogate)
         else:
             PyNomad.optimize(bb, x0, [], [], params)
@@ -281,7 +306,8 @@ def run_task(task: tuple) -> str:
 
 
 def inspect_problem(args: argparse.Namespace, name: str) -> dict:
-    problem = import_cutest_problem(name)
+    sif_params = sif_params_from_args(args)
+    problem = import_cutest_problem(name, sif_params)
     if not is_unconstrained(problem, allow_bounds=args.allow_bounds):
         raise ValueError("problem is constrained or bound-constrained")
     starts, start_records = generate_initial_starts(
@@ -296,6 +322,7 @@ def inspect_problem(args: argparse.Namespace, name: str) -> dict:
         "n": int(problem.n),
         "m_cutest": int(getattr(problem, "m", 0)),
         "has_bounds": has_finite_bounds(problem),
+        "sif_params": sif_params,
         "x0": x0,
         "starts": starts,
         "start_records": start_records,
@@ -308,8 +335,14 @@ def simulate(args: argparse.Namespace) -> None:
         shutil.rmtree(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
 
+    problem_names = args.problems
+    if args.auto_select_unconstrained:
+        problem_names = available_cutest_problem_names()
+        if args.auto_prefix:
+            problem_names = [name for name in problem_names if name.startswith(args.auto_prefix.upper())]
+
     metadata: dict[str, dict] = {}
-    for problem_name in args.problems:
+    for problem_name in problem_names:
         if len(metadata) >= args.auto_count:
             break
         try:
@@ -345,6 +378,7 @@ def simulate(args: argparse.Namespace) -> None:
                         sort_type,
                         info["n"],
                         x0,
+                        info["sif_params"],
                         str(results_dir),
                         args.max_bb_eval,
                         seed,
@@ -515,7 +549,10 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
 def add_sim_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--results-dir", type=Path, required=True)
     parser.add_argument("--problems", type=parse_problem_list, default=DEFAULT_PROBLEMS)
+    parser.add_argument("--auto-select-unconstrained", action="store_true")
+    parser.add_argument("--auto-prefix", default="")
     parser.add_argument("--auto-count", type=positive_int, default=40)
+    parser.add_argument("--sif-n", type=positive_int)
     parser.add_argument("--min-dim", type=positive_int, default=1)
     parser.add_argument("--max-dim", type=positive_int, default=10)
     parser.add_argument("--n-subinstances", type=positive_int, default=4)
