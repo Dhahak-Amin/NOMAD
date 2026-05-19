@@ -74,6 +74,7 @@ DEFAULT_STRATEGY_ORDER = [
 ]
 
 SURROGATE_STRATEGIES = {"OMNISCIENT", "REVERSE_OMNI"}
+EFFECTIVE_INFINITY = 1e19
 
 
 @dataclasses.dataclass(frozen=True)
@@ -99,9 +100,15 @@ def import_cutest_problem(name: str):
     return pycutest.import_problem(name)
 
 
+def is_effective_finite_bound(value: float) -> bool:
+    """Return true for real CUTEst bounds, false for +/- huge infinity sentinels."""
+    value_float = float(value)
+    return math.isfinite(value_float) and abs(value_float) < EFFECTIVE_INFINITY
+
+
 def has_finite_bounds(problem) -> bool:
     for value in list(getattr(problem, "bl", [])) + list(getattr(problem, "bu", [])):
-        if math.isfinite(float(value)):
+        if is_effective_finite_bound(value):
             return True
     return False
 
