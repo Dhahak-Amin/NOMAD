@@ -111,8 +111,8 @@ def import_cutest_problem(name: str):
 
 
 def problem_bounds(problem) -> tuple[list[float], list[float]]:
-    lower = [finite_bound(value, -1e20) for value in problem.bl]
-    upper = [finite_bound(value, 1e20) for value in problem.bu]
+    lower = [finite_bound(value, -1e20) for value in getattr(problem, "bl", [])]
+    upper = [finite_bound(value, 1e20) for value in getattr(problem, "bu", [])]
     return lower, upper
 
 
@@ -120,7 +120,8 @@ def cutest_constraints_to_pb(problem, x: list[float]) -> list[float]:
     """Convert CUTEst bounds cl <= c(x) <= cu to NOMAD PB values g(x) <= 0."""
     if getattr(problem, "m", 0) == 0:
         return []
-    cons = np.atleast_1d(problem.cons(x))
+    x_array = np.asarray(x, dtype=float)
+    cons = np.atleast_1d(problem.cons(x_array))
     values: list[float] = []
     for c_value, lower, upper in zip(cons, problem.cl, problem.cu):
         c_float = float(c_value)
@@ -137,8 +138,9 @@ def pb_violation(pb_values: Iterable[float]) -> float:
 
 def evaluate_cutest(problem, x: list[float]) -> tuple[float, list[float], float]:
     try:
-        objective = float(problem.obj(x))
-        pb_values = cutest_constraints_to_pb(problem, x)
+        x_array = np.asarray(x, dtype=float)
+        objective = float(problem.obj(x_array))
+        pb_values = cutest_constraints_to_pb(problem, x_array)
         h_value = pb_violation(pb_values)
         if not math.isfinite(objective) or not math.isfinite(h_value):
             raise ValueError("non-finite CUTEst evaluation")
@@ -285,7 +287,8 @@ def run_task(task: tuple) -> str:
 
 def inspect_problem(name: str) -> dict:
     problem = import_cutest_problem(name)
-    x0 = [float(value) for value in problem.x0]
+    x0_array = np.asarray(problem.x0, dtype=float)
+    x0 = [float(value) for value in x0_array]
     pb_values = cutest_constraints_to_pb(problem, x0)
     lower, upper = problem_bounds(problem)
     return {
@@ -309,9 +312,12 @@ def simulate(args: argparse.Namespace) -> None:
     for problem_name in args.problems:
         try:
             info = inspect_problem(problem_name)
-        except Exception:
+        except Exception as exc:
             if args.skip_missing:
-                print(f"skip missing/unavailable CUTEst problem: {problem_name}", flush=True)
+                print(
+                    f"skip unavailable CUTEst problem: {problem_name} ({type(exc).__name__}: {exc})",
+                    flush=True,
+                )
                 continue
             raise
         if info["m_pb"] == 0:
